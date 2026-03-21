@@ -195,7 +195,7 @@ def sync_excel(conn):
             """, (
                 row["Ticker"],
                 str(row.get("Sektor", "") or ""),
-                str(row.get("Prio", "M") or "M")[0].upper(),
+                (lambda p: p if p in ('H','M','L') else 'M')(str(row.get("Prio", "") or "M")[0].upper()),
                 _f(row.get("Max_Position_EUR")),
                 str(row.get("Notizen", "") or ""),
             ))

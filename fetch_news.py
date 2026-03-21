@@ -80,14 +80,19 @@ def fetch_yf_news(ticker: str, max_items: int = 10) -> list[dict]:
 
     result = []
     for item in news[:max_items]:
-        # yfinance news format varies — handle both old and new format
-        title = item.get("title", "")
-        publisher = item.get("publisher", "")
-        url = item.get("link", item.get("url", ""))
+        content = item.get("content", item)
+        title = content.get("title", "")
+        provider = content.get("provider", {})
+        publisher = provider.get("displayName", "") if isinstance(provider, dict) else str(provider)
+        canonical = content.get("canonicalUrl", {})
+        url = canonical.get("url", "") if isinstance(canonical, dict) else ""
 
-        pub_ts = item.get("providerPublishTime")
-        if pub_ts:
-            pub_date = datetime.fromtimestamp(pub_ts).date()
+        pub_str = content.get("pubDate", "")
+        if pub_str:
+            try:
+                pub_date = datetime.fromisoformat(pub_str.replace("Z", "+00:00")).date()
+            except (ValueError, TypeError):
+                pub_date = date.today()
         else:
             pub_date = date.today()
 
