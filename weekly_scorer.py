@@ -500,6 +500,8 @@ def main():
         if not args.dry_run:
             store_scores(conn, scored)
             send_discord_alert(scored)
+            from email_report import send_email_report
+            send_email_report(scored, WEEKLY_BUDGET, MAX_BUYS)
         else:
             log.info("Dry-run: Scores nicht gespeichert")
 
