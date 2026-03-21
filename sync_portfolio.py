@@ -43,7 +43,7 @@ DB_CONFIG = {
     "host":     os.getenv("STOCK_DB_HOST",   "192.168.0.189"),
     "port":     int(os.getenv("STOCK_DB_PORT", "5432")),
     "dbname":   os.getenv("STOCK_DB_NAME",   "stock_advisor"),
-    "user":     os.getenv("STOCK_DB_USER",   "postgres"),
+    "user":     os.getenv("STOCK_DB_USER",   "collector"),
     "password": os.getenv("STOCK_DB_PASS",   ""),
 }
 
@@ -57,7 +57,6 @@ def get_conn():
 
 # ── Ticker Mapping ───────────────────────────────────────────────────
 def resolve_yf_ticker(conn, broker_ticker: str) -> str:
-    """Broker-Ticker → yfinance-Ticker via ticker_map. Fallback: broker_ticker selbst."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT yf_ticker FROM ticker_map WHERE broker_ticker = %s",
@@ -68,7 +67,6 @@ def resolve_yf_ticker(conn, broker_ticker: str) -> str:
 
 
 def get_all_tickers(conn) -> list[dict]:
-    """Alle Ticker aus holdings + watchlist mit yfinance-Mapping."""
     with conn.cursor() as cur:
         cur.execute("""
             SELECT DISTINCT t.raw_ticker,
@@ -122,7 +120,6 @@ def add_technicals(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _f(val):
-    """NumPy float → Python float, NaN → None."""
     if val is None:
         return None
     try:
@@ -152,9 +149,10 @@ def sync_excel(conn):
     with conn.cursor() as cur:
         for _, row in df_port.iterrows():
             cur.execute("""
-                INSERT INTO holdings (ticker, shares, avg_buy, broker, sektor, notizen, updated)
-                VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                INSERT INTO holdings (ticker, name, shares, avg_buy, broker, sektor, notizen, updated)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
                 ON CONFLICT (ticker, broker) DO UPDATE SET
+                    name    = EXCLUDED.name,
                     shares  = EXCLUDED.shares,
                     avg_buy = EXCLUDED.avg_buy,
                     sektor  = EXCLUDED.sektor,
@@ -162,6 +160,7 @@ def sync_excel(conn):
                     updated = NOW()
             """, (
                 row["Ticker"],
+                str(row.get("Name", "") or ""),
                 float(row["Shares"]),
                 float(row["Avg_Buy_EUR"]),
                 str(row.get("Broker", "") or ""),
@@ -184,9 +183,10 @@ def sync_excel(conn):
     with conn.cursor() as cur:
         for _, row in df_watch.iterrows():
             cur.execute("""
-                INSERT INTO watchlist (ticker, sektor, prio, max_position, notizen, updated)
-                VALUES (%s, %s, %s, %s, %s, NOW())
+                INSERT INTO watchlist (ticker, name, sektor, prio, max_position, notizen, updated)
+                VALUES (%s, %s, %s, %s, %s, %s, NOW())
                 ON CONFLICT (ticker) DO UPDATE SET
+                    name         = EXCLUDED.name,
                     sektor       = EXCLUDED.sektor,
                     prio         = EXCLUDED.prio,
                     max_position = EXCLUDED.max_position,
@@ -194,6 +194,7 @@ def sync_excel(conn):
                     updated      = NOW()
             """, (
                 row["Ticker"],
+                str(row.get("Name", "") or ""),
                 str(row.get("Sektor", "") or ""),
                 (lambda p: p if p in ('H','M','L') else 'M')(str(row.get("Prio", "") or "M")[0].upper()),
                 _f(row.get("Max_Position_EUR")),
