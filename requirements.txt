@@ -1,0 +1,57 @@
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib
+anthropic
+beautifulsoup4
+python-dotenv
+psycopg2-binary
+
+
+Email-Newsletter  ←→  yfinance/RSS  ←→  PostgreSQL  ←→  XGBoost  ←→  Discord
+      ↓                    ↓                 ↓             ↓           ↓
+SentimentScore    Technik(RSI/ATR)   Holdings DB   Buy/Sell    "200€ BBAI"
+
+
+Der Stock Advisor braucht eine Database mit allen Stocks aus meinem aktuelle Portfolio...Desweiteren soll er ein "Watchlist" LIste mit weitern Stocks, die potenzielle KÄufe darstellen..Der Stock Advisor soll anhand des verfügbaren Kapital 1x pro Woche, freitag um 17Uhr eine Analyse machen...mit XGBoost ML die wertvollsten Stocks rausfinden und das Kapital auf bestehende Stocks oder wenn die Werte super sind, neue Stocks hinzufügen..Dabei ist zu beachten, möglichst wenig große Positionen aufzustocken um gebühr zu sparen (1Euro/Kauf)
+
+Neue Postionen sollen wirklcih nur ins Portfolio wenn sie fundamental und technisch viel stärker sind als Aktien aus dem bestehenden Portfolio...
+Postges Datenbank mit allen "verfügbaren" Werten 
+
+Dann müssen wir uns überlegen wie wir die aktuellen Portfolio Werte in die Datenbank bekommen (TradeRepublik und Scalable) ..:Finanzfluss kann TR und Scalable auch irgendwie abfragen, dh wir müssen das auch können !!! 
+
+Und dann braucht man ein guten schlüssel aus Fundamentals, Email Sentiment vom Newsletter_Sentiment Scorevom  Sentiment und Technischer Analyse für das Scoring, für die Bewertung...
+
+Sentiment Block sieht ca so aus: 
+
+[SENTIMENT_BLOCK_START]
+{
+  "PLUG": {"sentiment": 0.5, "relevance": 2},
+  "PCEL": {"sentiment": 0.5, "relevance": 2},
+  "ITMPF": {"sentiment": 0.5, "relevance": 2},
+  "RCAT": {"sentiment": 0.0, "relevance": 1},
+  "AEVA": {"sentiment": 0.0, "relevance": 1},
+  "BBAI": {"sentiment": 0.0, "relevance": 1},
+  "PATH": {"sentiment": 0.0, "relevance": 1},
+  "BTQ": {"sentiment": 0.2, "relevance": 1},
+  "LAES": {"sentiment": 0.0, "relevance": 1},
+  "FCE": {"sentiment": 0.0, "relevance": 1},
+  "BRN": {"sentiment": 0.0, "relevance": 1},
+  "IONQ": {"sentiment": 0.0, "relevance": 1},
+  "RGTI": {"sentiment": 0.0, "relevance": 1},
+  "QBTS": {"sentiment": 0.0, "relevance": 1},
+  "ONDS": {"sentiment": 0.0, "relevance": 1},
+  "VRT": {"sentiment": 0.0, "relevance": 1},
+  "ON": {"sentiment": 0.0, "relevance": 1},
+  "LMND": {"sentiment": 0.0, "relevance": 1},
+  "TXG": {"sentiment": 0.0, "relevance": 1},
+  "CGNX": {"sentiment": 0.0, "relevance": 1},
+  "SYM": {"sentiment": 0.0, "relevance": 1},
+  "TENB": {"sentiment": 0.0, "relevance": 1}
+}
+[SENTIMENT_BLOCK_END]
+
+
+Können wir auch noch die Homepages der Firmen "scapen", die haben oft auch eine News Abteilung, oder wird das zu aufwendig...
+
+
+Das ist nur ein einfaches Konzept, die Grundidee, genre verbessern, anpassen optimieren, finalisieren, gerne auch alle Dateien ändern, zusammenfügen usw...

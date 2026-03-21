@@ -1,0 +1,29 @@
+# Stock Advisor .env
+# Kopieren nach .env und Werte setzen
+
+# ── PostgreSQL (gleicher Container wie bybit_market) ──
+STOCK_DB_HOST=192.168.0.189
+STOCK_DB_PORT=5432
+STOCK_DB_NAME=stock_advisor
+STOCK_DB_USER=postgres
+STOCK_DB_PASS=dein_postgres_passwort
+
+# ── Claude API ──
+ANTHROPIC_API_KEY=sk-ant-...
+CLAUDE_MODEL=claude-sonnet-4-6
+
+# ── Portfolio Excel ──
+PORTFOLIO_EXCEL=portfolio_template.xlsx
+
+# ── yfinance History ──
+HISTORY_DAYS=365
+
+# ── News Batch Size (Headlines pro Claude-Call) ──
+NEWS_BATCH_SIZE=60
+
+# ── Newsletter Digest (nur falls auf gleicher Maschine) ──
+GMAIL_USER=dein@gmail.com
+GMAIL_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
+NEWSLETTER_SENDERS=motleyfool,seekingalpha,morningbrew
+LOOKBACK_HOURS=24
+WATCHLIST_TICKERS=PLUG,RCAT,AEVA,BBAI,PATH,ITMPF,BTQ,PCELL,LAES,FCE,BRN,ONDS,VRT,ON,LMND,TXG,CGNX,SYM,RGTI,IONQ,QBTS,TENB
