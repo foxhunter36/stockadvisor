@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """
-weekly_scorer.py — Wöchentlicher Stock + Crypto Advisor
+weekly_scorer.py — Wöchentlicher Stock + Crypto Advisor mit QVM.
 
-Trend-First DCA Scoring, separate Top N für Stocks und Crypto.
-Output: Discord + Email mit beiden Rankings.
+Scoring-Dimensionen:
+    Quality   (20%): ROE, D/E, OpMargin, FCF Yield — via yfinance fundamentals
+    Value     (15%): Forward PE, P/B, EV/EBITDA, Div Yield — via yfinance
+    Momentum  (35%): SMA Trend, RSI, BB, 52w Position — via DB + yfinance
+    Sentiment (30%): Newsletter + News Sentiment — via DB
+
+Output: Discord + Email mit Rankings, DB-Storage.
 
 Cron (Freitag 17:00 CET):
     0 17 * * 5 cd ~/stock_advisor && python3 weekly_scorer.py >> scorer.log 2>&1
@@ -22,6 +27,8 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 
+from qvm_fundamentals import fetch_fundamentals, score_quality, score_value, score_momentum_from_db
+
 load_dotenv()
 
 logging.basicConfig(
@@ -39,10 +46,14 @@ DB_CONFIG = {
     "password": os.getenv("STOCK_DB_PASS",   ""),
 }
 
-WEIGHT_TECH = float(os.getenv("WEIGHT_TECH", "0.6"))
-WEIGHT_SENT = float(os.getenv("WEIGHT_SENT", "0.4"))
+# Score-Gewichte (müssen 1.0 ergeben)
+WEIGHT_Q = float(os.getenv("WEIGHT_Q", "0.20"))
+WEIGHT_V = float(os.getenv("WEIGHT_V", "0.15"))
+WEIGHT_M = float(os.getenv("WEIGHT_M", "0.35"))
+WEIGHT_SENT = float(os.getenv("WEIGHT_SENT", "0.30"))
+
 WEEKLY_BUDGET = float(os.getenv("WEEKLY_BUDGET", "200"))
-BUY_THRESHOLD = float(os.getenv("BUY_THRESHOLD", "0.65"))
+BUY_THRESHOLD = float(os.getenv("BUY_THRESHOLD", "0.60"))
 MAX_BUYS = int(os.getenv("MAX_BUYS", "3"))
 
 GMAIL_USER = os.getenv("GMAIL_USER")
@@ -55,6 +66,21 @@ def get_conn():
 
 
 # ── Daten laden ──────────────────────────────────────────────────────
+
+def ensure_qvm_columns(conn):
+    """Fügt QVM-Spalten zur weekly_scores Tabelle hinzu falls nicht vorhanden."""
+    with conn.cursor() as cur:
+        for col in ["score_quality", "score_value", "score_momentum"]:
+            cur.execute(f"""
+                DO $$
+                BEGIN
+                    ALTER TABLE weekly_scores ADD COLUMN {col} NUMERIC(5,3);
+                EXCEPTION
+                    WHEN duplicate_column THEN NULL;
+                END $$;
+            """)
+    conn.commit()
+
 
 def get_all_tickers(conn) -> list[dict]:
     with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -120,131 +146,7 @@ def get_sentiment_7d(conn, yf_ticker: str) -> dict:
         }
 
 
-# ── Scoring Logik (Trend-First DCA) ─────────────────────────────────
-
-def score_technical(tech: dict, is_crypto: bool = False) -> tuple[float, str]:
-    if not tech or tech.get("close") is None:
-        return 0.3, "Keine Daten"
-
-    close = float(tech["close"])
-    rsi = float(tech["rsi_14"]) if tech.get("rsi_14") is not None else 50.0
-    bb = float(tech["bb_position"]) if tech.get("bb_position") is not None else 0.5
-    sma50 = float(tech["sma_50"]) if tech.get("sma_50") is not None else close
-    sma200 = float(tech["sma_200"]) if tech.get("sma_200") is not None else close
-    atr_pct = float(tech["atr_pct"]) if tech.get("atr_pct") is not None else 0.03
-
-    reasons = []
-
-    # ── TREND (40%)
-    if close > sma50 > sma200:
-        trend_score = 0.95
-        in_uptrend = True
-        reasons.append("Uptrend")
-    elif close > sma200 and close > sma50:
-        trend_score = 0.80
-        in_uptrend = True
-        reasons.append(">SMA50+200")
-    elif close > sma50:
-        trend_score = 0.65
-        in_uptrend = True
-        reasons.append(">SMA50")
-    elif close > sma200:
-        trend_score = 0.45
-        in_uptrend = False
-        reasons.append(">SMA200 only")
-    elif close < sma50 < sma200:
-        trend_score = 0.10
-        in_uptrend = False
-        reasons.append("Downtrend")
-    else:
-        trend_score = 0.25
-        in_uptrend = False
-        reasons.append("<SMA50")
-
-    # ── ENTRY TIMING (25%)
-    if in_uptrend:
-        if 30 <= rsi <= 45:
-            entry_score = 0.95
-            reasons.append(f"RSI {rsi:.0f} pullback ★")
-        elif 45 < rsi <= 55:
-            entry_score = 0.70
-            reasons.append(f"RSI {rsi:.0f} neutral")
-        elif rsi < 30:
-            entry_score = 0.60
-            reasons.append(f"RSI {rsi:.0f} deep dip")
-        elif 55 < rsi <= 70:
-            entry_score = 0.45
-            reasons.append(f"RSI {rsi:.0f} elevated")
-        else:
-            entry_score = 0.15
-            reasons.append(f"RSI {rsi:.0f} overbought")
-    else:
-        if rsi < 30:
-            entry_score = 0.20
-            reasons.append(f"RSI {rsi:.0f} oversold+down")
-        elif rsi < 45:
-            entry_score = 0.30
-        elif rsi < 55:
-            entry_score = 0.40
-            reasons.append(f"RSI {rsi:.0f} stabilizing")
-        else:
-            entry_score = 0.35
-
-    # ── VOLATILITY (20%) — Crypto hat höhere Schwellen
-    if is_crypto:
-        if atr_pct < 0.03:
-            vol_score = 0.80
-        elif atr_pct < 0.05:
-            vol_score = 0.75
-            reasons.append("GoodVol")
-        elif atr_pct < 0.08:
-            vol_score = 0.55
-        elif atr_pct < 0.12:
-            vol_score = 0.35
-            reasons.append(f"Vol {atr_pct:.0%}")
-        else:
-            vol_score = 0.15
-            reasons.append(f"HighVol {atr_pct:.0%}")
-    else:
-        if atr_pct < 0.02:
-            vol_score = 0.75
-        elif atr_pct < 0.035:
-            vol_score = 0.85
-            reasons.append("GoodVol")
-        elif atr_pct < 0.05:
-            vol_score = 0.60
-        elif atr_pct < 0.08:
-            vol_score = 0.35
-            reasons.append(f"Vol {atr_pct:.1%}")
-        else:
-            vol_score = 0.15
-            reasons.append(f"HighVol {atr_pct:.0%}")
-
-    # ── MOMENTUM (15%)
-    if in_uptrend:
-        if 0.3 <= bb <= 0.6:
-            mom_score = 0.80
-        elif 0.15 <= bb < 0.3:
-            mom_score = 0.90
-            reasons.append("BB dip buy")
-        elif bb < 0.15:
-            mom_score = 0.60
-        elif bb <= 0.8:
-            mom_score = 0.55
-        else:
-            mom_score = 0.30
-            reasons.append("BB high")
-    else:
-        if bb < 0.2:
-            mom_score = 0.15
-        elif bb < 0.5:
-            mom_score = 0.30
-        else:
-            mom_score = 0.45
-
-    score = (trend_score * 0.40 + entry_score * 0.25 + vol_score * 0.20 + mom_score * 0.15)
-    return round(score, 3), "; ".join(reasons)
-
+# ── Sentiment Scoring ────────────────────────────────────────────────
 
 def score_sentiment(sent: dict) -> tuple[float, str]:
     avg_s = sent["avg_sentiment"]
@@ -288,14 +190,32 @@ def score_sentiment(sent: dict) -> tuple[float, str]:
     return round(score, 3), "; ".join(reasons)
 
 
-def score_ticker(tech: dict | None, sent: dict, ticker_info: dict) -> dict:
-    is_crypto = ticker_info.get("sektor") == "Crypto"
-    tech_score, tech_reason = score_technical(tech, is_crypto)
-    sent_score, sent_reason = score_sentiment(sent)
+# ── QVM + Sentiment Scoring ──────────────────────────────────────────
 
-    total = tech_score * WEIGHT_TECH + sent_score * WEIGHT_SENT
+def score_ticker(tech: dict | None, sent: dict, fund: dict, ticker_info: dict) -> dict:
+    """
+    Kombiniertes Scoring: Quality + Value + Momentum + Sentiment.
+
+    Gewichte:
+        Q (20%): Fundamentale Unternehmensqualität
+        V (15%): Ist es gerade günstig bewertet?
+        M (35%): Trend, RSI, BB, 52w — technisches Momentum
+        S (30%): News + Newsletter Sentiment
+    """
+    q_score, q_reason = score_quality(fund)
+    v_score, v_reason = score_value(fund)
+    m_score, m_reason = score_momentum_from_db(tech, fund)
+    s_score, s_reason = score_sentiment(sent)
+
+    total = (
+        q_score * WEIGHT_Q +
+        v_score * WEIGHT_V +
+        m_score * WEIGHT_M +
+        s_score * WEIGHT_SENT
+    )
     total = round(total, 3)
 
+    # Prio-Boost für High-Priority Watchlist-Ticker
     prio = ticker_info.get("prio")
     if prio == "H":
         total = min(1.0, total * 1.05)
@@ -308,12 +228,20 @@ def score_ticker(tech: dict | None, sent: dict, ticker_info: dict) -> dict:
     else:
         action = "SKIP"
 
-    reasoning = f"T:{tech_score:.2f} ({tech_reason}) | S:{sent_score:.2f} ({sent_reason})"
+    reasoning = (
+        f"Q:{q_score:.2f} ({q_reason}) | "
+        f"V:{v_score:.2f} ({v_reason}) | "
+        f"M:{m_score:.2f} ({m_reason}) | "
+        f"S:{s_score:.2f} ({s_reason})"
+    )
 
     return {
         "score_total": total,
-        "score_tech": tech_score,
-        "score_sentiment": sent_score,
+        "score_quality": q_score,
+        "score_value": v_score,
+        "score_momentum": m_score,
+        "score_tech": m_score,  # Backward compat mit altem DB-Schema
+        "score_sentiment": s_score,
         "action": action,
         "reasoning": reasoning,
         "in_portfolio": ticker_info.get("in_portfolio"),
@@ -358,7 +286,7 @@ def format_section(title, scored):
     holds = [s for s in scored if s["action"] == "HOLD"]
     skips = [s for s in scored if s["action"] == "SKIP"]
 
-    lines = [f"\n  {title}\n  {'─' * 50}"]
+    lines = [f"\n  {title}\n  {'─' * 60}"]
 
     if buys:
         lines.append("")
@@ -366,10 +294,16 @@ def format_section(title, scored):
             eur = s.get("suggested_eur", 0)
             tag = "📌" if s.get("in_portfolio") else "👀"
             name = s.get("name") or s["raw_ticker"]
-            sektor = s.get("sektor") or ""
-            lines.append(f"  {i}. {s['raw_ticker']:<10s}  {name:<22s}  €{eur:>5.0f}  Score {s['score_total']:.2f}  {tag}")
+            q = s.get("score_quality", 0)
+            v = s.get("score_value", 0)
+            m = s.get("score_momentum", 0)
+            lines.append(
+                f"  {i}. {s['raw_ticker']:<10s}  {name:<20s}  "
+                f"€{eur:>5.0f}  QVM {q:.2f}/{v:.2f}/{m:.2f}  "
+                f"Total {s['score_total']:.2f}  {tag}"
+            )
         total = sum(s.get("suggested_eur", 0) for s in buys)
-        lines.append(f"  {'':34s}  €{total:>5.0f}  Total")
+        lines.append(f"  {'':46s}  €{total:>5.0f}  Total")
     else:
         lines.append("  Keine BUY-Empfehlungen")
 
@@ -392,10 +326,11 @@ def format_section(title, scored):
 # ── Output ───────────────────────────────────────────────────────────
 
 def print_results(stocks, cryptos):
-    print(f"\n{'=' * 60}")
-    print(f"  STOCK + CRYPTO ADVISOR — {date.today()}")
+    print(f"\n{'=' * 65}")
+    print(f"  STOCK + CRYPTO ADVISOR (QVM) — {date.today()}")
     print(f"  Budget: €{WEEKLY_BUDGET:.0f} each | Top {MAX_BUYS}")
-    print(f"{'=' * 60}")
+    print(f"  Weights: Q={WEIGHT_Q:.0%} V={WEIGHT_V:.0%} M={WEIGHT_M:.0%} S={WEIGHT_SENT:.0%}")
+    print(f"{'=' * 65}")
     print(format_section("📈 STOCKS", stocks))
     print(format_section("🪙 CRYPTO", cryptos))
 
@@ -405,7 +340,7 @@ def print_results(stocks, cryptos):
         print(f"\n  Detail:\n")
         for s in stock_buys + crypto_buys:
             print(f"  {s['raw_ticker']}: {s['reasoning']}")
-    print(f"\n{'=' * 60}\n")
+    print(f"\n{'=' * 65}\n")
 
 
 def store_scores(conn, scored: list[dict]):
@@ -415,18 +350,23 @@ def store_scores(conn, scored: list[dict]):
             cur.execute("""
                 INSERT INTO weekly_scores
                     (run_date, ticker, yf_ticker, score_total, score_tech,
-                     score_sentiment, action, suggested_eur, reasoning)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     score_sentiment, score_quality, score_value, score_momentum,
+                     action, suggested_eur, reasoning)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (run_date, ticker) DO UPDATE SET
                     score_total     = EXCLUDED.score_total,
                     score_tech      = EXCLUDED.score_tech,
                     score_sentiment = EXCLUDED.score_sentiment,
+                    score_quality   = EXCLUDED.score_quality,
+                    score_value     = EXCLUDED.score_value,
+                    score_momentum  = EXCLUDED.score_momentum,
                     action          = EXCLUDED.action,
                     suggested_eur   = EXCLUDED.suggested_eur,
                     reasoning       = EXCLUDED.reasoning
             """, (
                 today, s["raw_ticker"], s["yf_ticker"],
                 s["score_total"], s["score_tech"], s["score_sentiment"],
+                s.get("score_quality"), s.get("score_value"), s.get("score_momentum"),
                 s["action"], s.get("suggested_eur"), s["reasoning"],
             ))
     conn.commit()
@@ -445,7 +385,7 @@ def send_discord_alert(stocks, cryptos):
 
     import requests
 
-    lines = [f"📊 **Stock + Crypto Advisor — {date.today()}**"]
+    lines = [f"📊 **Stock + Crypto Advisor (QVM) — {date.today()}**"]
 
     if stock_buys:
         lines.append("\n**📈 Stocks**")
@@ -453,7 +393,14 @@ def send_discord_alert(stocks, cryptos):
             eur = s.get("suggested_eur", 0)
             name = s.get("name") or s["raw_ticker"]
             tag = "📌" if s.get("in_portfolio") else "👀"
-            lines.append(f"🟢 **{s['raw_ticker']}** {name} — {s['score_total']:.2f} — €{eur:.0f} {tag}")
+            q = s.get("score_quality", 0)
+            v = s.get("score_value", 0)
+            m = s.get("score_momentum", 0)
+            lines.append(
+                f"🟢 **{s['raw_ticker']}** {name} — "
+                f"Q:{q:.2f} V:{v:.2f} M:{m:.2f} = {s['score_total']:.2f} — "
+                f"€{eur:.0f} {tag}"
+            )
 
     if crypto_buys:
         lines.append("\n**🪙 Crypto**")
@@ -461,7 +408,9 @@ def send_discord_alert(stocks, cryptos):
             eur = s.get("suggested_eur", 0)
             name = s.get("name") or s["raw_ticker"]
             tag = "📌" if s.get("in_portfolio") else "👀"
-            lines.append(f"🟢 **{s['raw_ticker']}** {name} — {s['score_total']:.2f} — €{eur:.0f} {tag}")
+            lines.append(
+                f"🟢 **{s['raw_ticker']}** {name} — {s['score_total']:.2f} — €{eur:.0f} {tag}"
+            )
 
     s_total = sum(s.get("suggested_eur", 0) for s in stock_buys)
     c_total = sum(s.get("suggested_eur", 0) for s in crypto_buys)
@@ -479,9 +428,10 @@ def send_email_report(stocks, cryptos):
         return
 
     lines = [
-        f"STOCK + CRYPTO ADVISOR — Weekly Report {date.today()}",
+        f"STOCK + CRYPTO ADVISOR (QVM) — Weekly Report {date.today()}",
         f"Budget: €{WEEKLY_BUDGET:.0f} each | Top {MAX_BUYS}",
-        "=" * 60,
+        f"Weights: Q={WEIGHT_Q:.0%} V={WEIGHT_V:.0%} M={WEIGHT_M:.0%} S={WEIGHT_SENT:.0%}",
+        "=" * 65,
     ]
 
     for title, scored in [("📈 STOCKS", stocks), ("🪙 CRYPTO", cryptos)]:
@@ -490,14 +440,18 @@ def send_email_report(stocks, cryptos):
         holds = [s for s in scored_s if s["action"] == "HOLD"]
         skips = [s for s in scored_s if s["action"] == "SKIP"]
 
-        lines.append(f"\n{title}\n{'─' * 50}")
+        lines.append(f"\n{title}\n{'─' * 55}")
         if buys:
             for i, s in enumerate(buys, 1):
                 eur = s.get("suggested_eur", 0)
                 tag = "📌 Portfolio" if s.get("in_portfolio") else "👀 Watchlist"
                 name = s.get("name") or s["raw_ticker"]
+                q = s.get("score_quality", 0)
+                v = s.get("score_value", 0)
+                m = s.get("score_momentum", 0)
                 lines.append(f"\n  {i}. {s['raw_ticker']:<10s}  {name}")
-                lines.append(f"     Score: {s['score_total']:.2f}  |  €{eur:.0f}  |  {tag}")
+                lines.append(f"     Q:{q:.2f}  V:{v:.2f}  M:{m:.2f}  S:{s['score_sentiment']:.2f}  = {s['score_total']:.2f}")
+                lines.append(f"     €{eur:.0f}  |  {tag}")
                 lines.append(f"     {s['reasoning']}")
             total = sum(s.get("suggested_eur", 0) for s in buys)
             lines.append(f"\n  Total: €{total:.0f}")
@@ -509,20 +463,20 @@ def send_email_report(stocks, cryptos):
             for s in holds:
                 name = s.get("name") or ""
                 tag = " 📌" if s.get("in_portfolio") else ""
-                lines.append(f"    {s['raw_ticker']:<10s} {name:<22s} {s['score_total']:.2f}{tag}")
+                lines.append(f"    {s['raw_ticker']:<10s} {name:<20s} {s['score_total']:.2f}{tag}")
 
         if skips:
             lines.append(f"\n  SKIP ({len(skips)}):")
             for s in skips:
                 name = s.get("name") or ""
-                lines.append(f"    {s['raw_ticker']:<10s} {name:<22s} {s['score_total']:.2f}")
+                lines.append(f"    {s['raw_ticker']:<10s} {name:<20s} {s['score_total']:.2f}")
 
-    lines.append(f"\n{'=' * 60}")
-    lines.append("Automatisch generiert von Stock + Crypto Advisor")
+    lines.append(f"\n{'=' * 65}")
+    lines.append("Automatisch generiert von Stock + Crypto Advisor (QVM)")
 
     body = "\n".join(lines)
     msg = MIMEText(body, _charset="utf-8")
-    msg["Subject"] = f"📊 Weekly Advisor — {date.today()}"
+    msg["Subject"] = f"📊 Weekly QVM Advisor — {date.today()}"
     msg["From"] = GMAIL_USER
     msg["To"] = EMAIL_RECIPIENTS
 
@@ -551,17 +505,24 @@ def main():
 
     conn = get_conn()
     try:
+        # DB-Schema erweitern falls nötig
+        ensure_qvm_columns(conn)
+
         tickers = get_all_tickers(conn)
         log.info("%d Ticker laden", len(tickers))
 
         scored = []
         for t in tickers:
-            yf = t["yf_ticker"]
-            tech = get_latest_technicals(conn, yf)
-            sent = get_sentiment_7d(conn, yf)
-            result = score_ticker(tech, sent, t)
+            yf_ticker = t["yf_ticker"]
+            log.info("%-10s  Scoring...", yf_ticker)
+
+            tech = get_latest_technicals(conn, yf_ticker)
+            sent = get_sentiment_7d(conn, yf_ticker)
+            fund = fetch_fundamentals(yf_ticker)
+
+            result = score_ticker(tech, sent, fund, t)
             result["raw_ticker"] = t["raw_ticker"]
-            result["yf_ticker"] = yf
+            result["yf_ticker"] = yf_ticker
             scored.append(result)
 
         stocks, cryptos = split_stock_crypto(scored)
