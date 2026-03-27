@@ -43,6 +43,19 @@ def get_conn():
     return psycopg2.connect(**DB_CONFIG)
 
 
+def get_valid_tickers(conn) -> set[str]:
+    """Alle Ticker aus holdings + watchlist (+ yf_ticker aus ticker_map)."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT UPPER(ticker) FROM holdings
+            UNION
+            SELECT UPPER(ticker) FROM watchlist
+            UNION
+            SELECT UPPER(yf_ticker) FROM ticker_map
+        """)
+        return {r[0] for r in cur.fetchall()}
+
+
 def extract_sentiment_block(text: str) -> dict:
     """Extrahiert JSON aus [SENTIMENT_BLOCK_START]...[SENTIMENT_BLOCK_END]."""
     pattern = r'\[SENTIMENT_BLOCK_START\]\s*(.*?)\s*\[SENTIMENT_BLOCK_END\]'
@@ -103,11 +116,19 @@ def parse_and_store_sentiment(text: str, source: str = "newsletter") -> int:
         log.info("Keine Sentiments zu speichern")
         return 0
 
-    log.info("Geparste Ticker: %s", list(sentiments.keys()))
+    log.info("Geparste Ticker (roh): %s", list(sentiments.keys()))
 
     conn = get_conn()
     try:
-        count = store_email_sentiment(conn, sentiments, source)
+        valid = get_valid_tickers(conn)
+        filtered = {k: v for k, v in sentiments.items() if k.upper().strip() in valid}
+        dropped = set(sentiments.keys()) - set(filtered.keys())
+
+        if dropped:
+            log.info("Gefiltert (nicht in Holdings/Watchlist): %s", sorted(dropped))
+        log.info("Behalte %d von %d Ticker", len(filtered), len(sentiments))
+
+        count = store_email_sentiment(conn, filtered, source)
     finally:
         conn.close()
 
