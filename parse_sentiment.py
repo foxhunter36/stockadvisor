@@ -30,6 +30,12 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# Newsletter-Ticker die anders heißen als in Holdings/Watchlist
+TICKER_ALIASES = {
+    "FCE": "FCEL",
+    "PCEL": "PCELL",
+}
+
 DB_CONFIG = {
     "host":     os.getenv("STOCK_DB_HOST",   "192.168.0.189"),
     "port":     int(os.getenv("STOCK_DB_PORT", "5432")),
@@ -109,7 +115,7 @@ def store_email_sentiment(conn, sentiments: dict, source: str = "newsletter"):
 
 
 def parse_and_store_sentiment(text: str, source: str = "newsletter") -> int:
-    """Hauptfunktion: Text → Parse → DB. Returns Anzahl gespeicherter Ticker."""
+    """Hauptfunktion: Text → Parse → Filter → DB. Returns Anzahl gespeicherter Ticker."""
     sentiments = extract_sentiment_block(text)
 
     if not sentiments:
@@ -117,6 +123,9 @@ def parse_and_store_sentiment(text: str, source: str = "newsletter") -> int:
         return 0
 
     log.info("Geparste Ticker (roh): %s", list(sentiments.keys()))
+
+    # Newsletter-Ticker normalisieren (FCE→FCEL, PCEL→PCELL etc.)
+    sentiments = {TICKER_ALIASES.get(k.upper(), k): v for k, v in sentiments.items()}
 
     conn = get_conn()
     try:
